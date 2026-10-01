@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>SOS Panic Gateway - Web PoC</title>
+  
+  <!-- Leaflet CSS for Map -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --medical: #0284c7;
+      --safety: #dc2626;
+      --accent: #10b981;
+      --border: #334155;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { background: var(--bg); color: var(--text); padding: 16px; min-height: 100vh; display: flex; flex-direction: column; gap: 16px; }
+
+    header { display: flex; justify-content: space-between; align-items: center; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+    h1 { font-size: 1.25rem; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+    .badge { font-size: 0.75rem; padding: 4px 8px; border-radius: 999px; font-weight: 600; text-transform: uppercase; background: #334155; color: var(--muted); }
+    .badge.connected { background: #065f46; color: #34d399; }
+
+    .card { background: var(--card-bg); border-radius: 12px; padding: 16px; border: 1px solid var(--border); }
+    .card-title { font-size: 0.9rem; font-weight: 600; color: var(--muted); margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
+
+    /* Button */
+    button { width: 100%; padding: 14px; border-radius: 8px; border: none; font-weight: 600; font-size: 1rem; cursor: pointer; transition: all 0.2s ease; display: flex; align-items: center; justify-content: center; gap: 8px; }
+    .btn-connect { background: var(--accent); color: #022c22; }
+    .btn-connect:hover { opacity: 0.9; }
+
+    /* Trigger Display Banner */
+    .alert-banner { display: none; padding: 16px; border-radius: 10px; text-align: center; font-weight: 700; font-size: 1.1rem; animation: pulse 1s infinite alternate; }
+    .alert-banner.medical { display: block; background: #0369a1; color: #fff; border: 2px solid #38bdf8; }
+    .alert-banner.safety { display: block; background: #991b1b; color: #fff; border: 2px solid #f87171; }
+
+    @keyframes pulse {
+      0% { transform: scale(0.99); opacity: 0.9; }
+      100% { transform: scale(1.01); opacity: 1; }
+    }
+
+    /* Form Fields */
+    .field-group { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+    label { font-size: 0.8rem; color: var(--muted); font-weight: 500; }
+    input { background: #0f172a; border: 1px solid var(--border); border-radius: 6px; padding: 10px; color: var(--text); font-size: 0.95rem; }
+    input:focus { outline: none; border-color: var(--accent); }
+
+    /* Map */
+    #map { height: 180px; border-radius: 8px; border: 1px solid var(--border); }
+
+    /* Event Logs */
+    .log-container { max-height: 120px; overflow-y: auto; font-family: monospace; font-size: 0.8rem; color: var(--muted); display: flex; flex-direction: column; gap: 4px; }
+    .log-item { padding: 4px 6px; border-radius: 4px; background: #0f172a; }
+
+    /* Test buttons */
+    .demo-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+    .btn-med { background: var(--medical); color: #fff; padding: 10px; font-size: 0.85rem; }
+    .btn-safe { background: var(--safety); color: #fff; padding: 10px; font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>🛡️ SOS Gateway</h1>
+    <span id="bleStatusBadge" class="badge">Disconnected</span>
+  </header>
+
+  <!-- Live Emergency State Display -->
+  <div id="alertBanner" class="alert-banner"></div>
+
+  <!-- Gateway Bluetooth Connection Card -->
+  <div class="card">
+    <div class="card-title">Hardware Link</div>
+    <button id="connectBtn" class="btn-connect" onclick="connectBLE()">
+      <span>🔗 Pair ESP32 Remote</span>
+    </button>
+  </div>
+
+  <!-- Guardian Configuration -->
+  <div class="card">
+    <div class="card-title">Guardian WhatsApp Setup (CallMeBot)</div>
+    <div class="field-group">
+      <label>Guardian Phone Number (with Country Code)</label>
+      <input type="text" id="phoneInput" placeholder="e.g. +919876543210" />
+    </div>
+    <div class="field-group">
+      <label>CallMeBot API Key</label>
+      <input type="text" id="apiKeyInput" placeholder="e.g. 123456" />
+    </div>
+    <button style="background: #334155; color: #fff; padding: 8px;" onclick="saveConfig()">Save Settings</button>
+  </div>
+
+  <!-- GPS Live Tracking -->
+  <div class="card">
+    <div class="card-title">Live Location Pin</div>
+    <div id="map"></div>
+    <p id="coordsText" style="font-size: 0.8rem; color: var(--muted); margin-top: 8px;">GPS: Waiting for fix...</p>
+  </div>
+
+  <!-- Manual Simulator Controls for Evaluator Demo -->
+  <div class="card">
+    <div class="card-title">Demo Simulator (No-Hardware Test)</div>
+    <div class="demo-grid">
+      <button class="btn-med" onclick="triggerAlert(1)">Simulate Medical (0x01)</button>
+      <button class="btn-safe" onclick="triggerAlert(2)">Simulate Safety (0x02)</button>
+    </div>
+  </div>
+
+  <!-- System Logs -->
+  <div class="card">
+    <div class="card-title">Event Log</div>
+    <div id="logs" class="log-container">
+      <div class="log-item">[INIT] System ready. Connect remote or simulate alert.</div>
+    </div>
+  </div>
+
+  <!-- Leaflet JS for Map -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <script>
+    // BLE UUIDs matching ESP32 firmware
+    const SERVICE_UUID        = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+    const CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+
+    let currentLat = null;
+    let currentLng = null;
+    let map = null;
+    let marker = null;
+
+    // Load saved settings
+    document.getElementById("phoneInput").value = localStorage.getItem("sos_phone") || "";
+    document.getElementById("apiKeyInput").value = localStorage.getItem("sos_apikey") || "";
+
+    function log(msg) {
+      const logs = document.getElementById("logs");
+      const item = document.createElement("div");
+      item.className = "log-item";
+      const time = new Date().toLocaleTimeString();
+      item.innerText = `[${time}] ${msg}`;
+      logs.prepend(item);
+    }
+
+    function saveConfig() {
+      const phone = document.getElementById("phoneInput").value.trim();
+      const key = document.getElementById("apiKeyInput").value.trim();
+      localStorage.setItem("sos_phone", phone);
+      localStorage.setItem("sos_apikey", key);
+      log("Guardian configuration saved.");
+      alert("Settings saved successfully!");
+    }
+
+    // Audio beep using Web Audio API
+    function playAlertTone(frequency, count) {
+      try {
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        for (let i = 0; i < count; i++) {
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          osc.type = "sine";
+          osc.frequency.setValueAtTime(frequency, audioCtx.currentTime + i * 0.25);
+          gain.gain.setValueAtTime(0.3, audioCtx.currentTime + i * 0.25);
+          gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + i * 0.25 + 0.2);
+          osc.connect(gain);
+          gain.connect(audioCtx.destination);
+          osc.start(audioCtx.currentTime + i * 0.25);
+          osc.stop(audioCtx.currentTime + i * 0.25 + 0.2);
+        }
+      } catch (e) {
+        console.warn("Audio Context not allowed without interaction", e);
+      }
+    }
+
+    // Initialize Map
+    function initMap() {
+      map = L.map('map').setView([20.5937, 78.9629], 5);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '© OpenStreetMap'
+      }).addTo(map);
+
+      // Start GPS Tracking
+      if ("geolocation" in navigator) {
+        navigator.geolocation.watchPosition(
+          (pos) => {
+            currentLat = pos.coords.latitude;
+            currentLng = pos.coords.longitude;
+            const accuracy = Math.round(pos.coords.accuracy);
+
+            document.getElementById("coordsText").innerText = 
+              `GPS: ${currentLat.toFixed(5)}, ${currentLng.toFixed(5)} (±${accuracy}m)`;
+
+            if (!marker) {
+              marker = L.marker([currentLat, currentLng]).addTo(map);
+              map.setView([currentLat, currentLng], 16);
+            } else {
+              marker.setLatLng([currentLat, currentLng]);
+            }
+          },
+          (err) => {
+            log(`GPS Warning: ${err.message}. Ensure location permissions are allowed.`);
+          },
+          { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 }
+        );
+      } else {
+        log("Geolocation API not supported on this browser.");
+      }
+    }
+
+    // Web Bluetooth Connection
+    async function connectBLE() {
+      if (!navigator.bluetooth) {
+        alert("Web Bluetooth is not supported in this browser. Please use Chrome on Android.");
+        return;
+      }
+
+      try {
+        log("Scanning for ESP32-SOS-REMOTE...");
+        const device = await navigator.bluetooth.requestDevice({
+          filters: [{ name: "ESP32-SOS-REMOTE" }],
+          optionalServices: [SERVICE_UUID]
+        });
+
+        device.addEventListener('gattserverdisconnected', onDisconnected);
+
+        log("Connecting to GATT Server...");
+        const server = await device.gatt.connect();
+
+        const service = await server.getPrimaryService(SERVICE_UUID);
+        const characteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
+
+        await characteristic.startNotifications();
+        characteristic.addEventListener('characteristicvaluechanged', handleCharacteristicValueChanged);
+
+        const badge = document.getElementById("bleStatusBadge");
+        badge.innerText = "Connected";
+        badge.className = "badge connected";
+        document.getElementById("connectBtn").innerText = "✅ Remote Connected";
+        document.getElementById("connectBtn").style.background = "#065f46";
+        document.getElementById("connectBtn").style.color = "#34d399";
+        log("ESP32 Remote successfully connected and listening for triggers.");
+
+      } catch (error) {
+        log(`BLE Connection Error: ${error.message}`);
+      }
+    }
+
+    function onDisconnected() {
+      const badge = document.getElementById("bleStatusBadge");
+      badge.innerText = "Disconnected";
+      badge.className = "badge";
+      document.getElementById("connectBtn").innerText = "🔗 Pair ESP32 Remote";
+      document.getElementById("connectBtn").style.background = "var(--accent)";
+      document.getElementById("connectBtn").style.color = "#022c22";
+      log("ESP32 Remote Disconnected.");
+    }
+
+    function handleCharacteristicValueChanged(event) {
+      const value = event.target.value.getUint8(0);
+      log(`BLE Data Received: 0x0${value.toString(16)}`);
+      triggerAlert(value);
+    }
+
+    // Trigger SOS Logic
+    async function triggerAlert(alertType) {
+      const banner = document.getElementById("alertBanner");
+      let typeLabel = "";
+      let emoji = "";
+
+      if (alertType === 1) { // 0x01
+        typeLabel = "MEDICAL EMERGENCY";
+        emoji = "🚨";
+        banner.className = "alert-banner medical";
+        banner.innerHTML = `${emoji} ${typeLabel} TRIGGERED! Dispatching WhatsApp alert...`;
+        playAlertTone(800, 2);
+      } else if (alertType === 2) { // 0x02
+        typeLabel = "CRITICAL SAFETY / THREAT";
+        emoji = "⚠️";
+        banner.className = "alert-banner safety";
+        banner.innerHTML = `${emoji} ${typeLabel} TRIGGERED! Dispatching WhatsApp alert...`;
+        playAlertTone(440, 1);
+      } else {
+        return; // Ignore heartbeat/idle
+      }
+
+      log(`[ALERT] Dispatching ${typeLabel}...`);
+
+      const phone = localStorage.getItem("sos_phone");
+      const apiKey = localStorage.getItem("sos_apikey");
+
+      const mapsLink = currentLat && currentLng 
+        ? `https://maps.google.com/?q=${currentLat},${currentLng}` 
+        : `Location unavailable`;
+
+      const msg = `${emoji} *SOS ALERT: ${typeLabel}*\nImmediate help requested!\n📍 Live Location: ${mapsLink}`;
+
+      if (!phone || !apiKey) {
+        log("Warning: Phone or CallMeBot API key missing in settings.");
+        // Fallback: Open in WhatsApp Web / App directly
+        window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, '_blank');
+        return;
+      }
+
+      // Dispatch via CallMeBot API
+      const apiUrl = `https://api.callmebot.com/whatsapp.php?phone=${encodeURIComponent(phone)}&text=${encodeURIComponent(msg)}&apikey=${encodeURIComponent(apiKey)}`;
+
+      try {
+        // mode: 'no-cors' allows browser to fire the request to CallMeBot silently
+        await fetch(apiUrl, { mode: 'no-cors' });
+        log("WhatsApp message successfully dispatched via CallMeBot!");
+      } catch (err) {
+        log(`WhatsApp Dispatch Error: ${err.message}. Triggering WhatsApp link fallback...`);
+        window.open(`https://wa.me/${phone.replace(/[^0-9]/g, '')}?text=${encodeURIComponent(msg)}`, '_blank');
+      }
+    }
+
+    window.onload = initMap;
+  </script>
+</body>
+</html>
